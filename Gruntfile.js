@@ -14,9 +14,7 @@ module.exports = function (grunt) {
 	grunt.loadNpmTasks('grunt-express');
 	grunt.loadNpmTasks('grunt-shell');
 
-	var path = require('path'),
-		isWindows = process.platform === 'win32',
-		ptorDir = 'node_modules' + (isWindows ? '/.' : '/protractor/') + 'bin/';
+	var path = require('path');
 
 	// Project configuration.
 	grunt.initConfig({
@@ -41,11 +39,12 @@ module.exports = function (grunt) {
 		},
 
 		protractor_webdriver: {
-			e2e: {
+			alive: {
 				options: {
-					path: ptorDir
+					keepAlive: true
 				}
-			}
+			},
+			dead: {}
 		},
 
 		protractor: {
@@ -53,7 +52,8 @@ module.exports = function (grunt) {
 				configFile: 'protractor.conf.js',
 				keepAlive: false
 			},
-			local: {}
+			target1: {},
+			target2: {}
 		},
 
 		shell: {
@@ -61,7 +61,7 @@ module.exports = function (grunt) {
 				options: {
 					stdout: true
 				},
-				command: path.resolve(ptorDir + 'webdriver-manager') + ' update --standalone --chrome'
+				command: path.resolve('node_modules/protractor/bin/webdriver-manager') + ' update --standalone --chrome'
 			}
 		}
 	});
@@ -71,8 +71,11 @@ module.exports = function (grunt) {
 		'default',
 		'express:server',
 		'shell:protractor',
-		'protractor_webdriver:e2e',
-		'protractor:local'
+		'protractor_webdriver:alive',
+		'protractor:target1',
+		'protractor:target2',
+		'protractor_webdriver:dead',
+		'protractor:target1'
 	]);
 
 	grunt.registerTask('server', [

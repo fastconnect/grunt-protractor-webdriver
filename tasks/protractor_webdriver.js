@@ -20,15 +20,17 @@ module.exports = function (grunt) {
 		rl = require('readline'),
 		noop = function () {},
 		REGEXP_REMOTE = /RemoteWebDriver instances should connect to: (.*)/,
-		REGEXP_STARTED = /Started org\.openqa\.jetty\.jetty\.Server/,
-		REGEXP_RUNNING = /Selenium is already running/,
-		REGEXP_FAILURE = /Failed to start/,
+		REGEXP_START_READY = /Started org\.openqa\.jetty\.jetty\.Server/,
+		REGEXP_START_RUNNING = /Selenium is already running/,
+		REGEXP_START_FAILURE = /Failed to start/,
+		REGEXP_START_NOTPRESENT = /Selenium Standalone is not present/i,
 		REGEXP_SESSION_DELETE = /Executing: \[delete session: (.*)\]/,
 		REGEXP_SESSION_NEW = /Executing: \[new session: (.*)\]/,
 		REGEXP_CAPABILITIES = /Capabilities \[\{(.*)\}\]/,
-		REGEXP_EXCEPTION = /Exception thrown(.*)/m,
-		REGEXP_FATAL = /Fatal error/,
+		REGEXP_EXIT_EXCEPTION = /Exception thrown(.*)/m,
+		REGEXP_EXIT_FATAL = /Fatal error/,
 		REGEXP_SHUTDOWN_OK = /OKOK/i,
+		DEFAULT_PATH = 'node_modules/protractor/bin/',
 		DEFAULT_CMD = 'webdriver-manager start',
 		DEFAULT_INSTANCE = 'http://localhost:4444';
 
@@ -71,13 +73,13 @@ module.exports = function (grunt) {
 			stackTrace,
 			server = DEFAULT_INSTANCE,
 			sessions = 0, // Running sessions
-			status = [false, false, false],// [0 = Stopping, 1 = Stopped, 2 = exited]
+			status = [false, false, false],// [0 = Stopping, 1 = Stopped, 2 = Exited]
 			stopCallbacks = [];
 
 		function start() {
 			grunt.log.writeln((restartedPrefix + 'tarting').cyan + ' Selenium server');
 
-			selenium = exec(options.path + options.command);
+			selenium = exec('node ' + options.path + options.command);
 			selenium.on('error', exit)
 				.on('uncaughtException', exit)
 				.on('exit', exit)
@@ -103,6 +105,7 @@ module.exports = function (grunt) {
 		function stop(callback) {
 			if (status[2]) {
 				callback(true);
+				return;
 			} else if (status[0] || status[1]) {
 				stopCallbacks.push(callback);
 				return;
@@ -157,10 +160,10 @@ module.exports = function (grunt) {
 
 			if (REGEXP_REMOTE.test(out)) {
 				server = extract(REGEXP_REMOTE, out, 1).replace(/\/wd\/hub/, '') || server;
-			} else if (REGEXP_STARTED.test(out)) {
+			} else if (REGEXP_START_READY.test(out)) {
 				// Success
 				started(done);
-			} else if (REGEXP_RUNNING.test(out)) {
+			} else if (REGEXP_START_RUNNING.test(out)) {
 				if (failureTimeout) {
 					clearTimeout(failureTimeout);
 				}
@@ -175,24 +178,33 @@ module.exports = function (grunt) {
 						destroy();
 					}
 				});
-			} else if (REGEXP_FAILURE.test(out)) {
+			} else if (REGEXP_START_FAILURE.test(out)) {
 				// Failure -> Exit after timeout. The timeout is needed to
 				// enable further console sniffing as the output needed to
 				// match `REGEXP_RUNNING` is coming behind the failure message.
 				failureTimeout = setTimeout(destroy, 500);
-			} else if (REGEXP_EXCEPTION.test(out)) {
+			} else if (REGEXP_START_NOTPRESENT.test(out)) {
+				// Failure -> Selenium server not present
+				grunt.warn(out);
+			} else if (REGEXP_EXIT_EXCEPTION.test(out)) {
 				// Failure -> Exit
-				grunt.log.writeln('Exception thrown:'.red);
-        stackTrace = out;
-        grunt.warn(out);
-				// destroy();
-			} else if (REGEXP_FATAL.test(out)) {
+				var msg = 'Exception thrown: '.red;
+				if (options.keepAlive) {
+					grunt.log.writeln(msg + 'Keeping the Selenium server alive');
+	        stackTrace = out;
+	        grunt.warn(out);
+				} else {
+					grunt.log.writeln(msg + 'Going to shut down the Selenium server');
+					stackTrace = out;
+					destroy();
+				}
+			} else if (REGEXP_EXIT_FATAL.test(out)) {
 				// Failure -> Exit
 				destroy();
 			} else if (REGEXP_SESSION_NEW.test(out)) {
 				// As there might be race-conditions with multiple logs for
 				// `REGEXP_SESSION_NEW` in one log statement, we have to parse
-				// parse the data
+				// the data
 				lines = out.split(/[\n\r]/);
 				lines.forEach(function (line) {
 					if (REGEXP_SESSION_NEW.test(line)) {
@@ -203,7 +215,7 @@ module.exports = function (grunt) {
 				});
 			} else if (REGEXP_SESSION_DELETE.test(out)) {
 				// As there might be race-conditions with multiple logs for
-				// `REGEXP_SESSION_NEW` in one log statement, we have to parse
+				// `REGEXP_SESSION_DELETE` in one log statement, we have to
 				// parse the data
 				lines = out.split(/[\n\r]/);
 				lines.forEach(function (line) {
@@ -213,8 +225,12 @@ module.exports = function (grunt) {
 
 						if (sessions <= 0) {
 							// Done -> Exit
-							grunt.log.writeln(msg + 'Going to shut down the Selenium server');
-							destroy(noop);
+							if (options.keepAlive) {
+								grunt.log.writeln(msg + 'Keeping the Selenium server alive');
+							} else {
+								grunt.log.writeln(msg + 'Going to shut down the Selenium server');
+								destroy(noop);
+							}
 						} else {
 							grunt.log.writeln(msg + sessions + ' session(s) left');
 						}
@@ -223,13 +239,25 @@ module.exports = function (grunt) {
 			}
 		}
 
+		process.on('removeListener', function (event, fn) {
+			// Grunt uses node-exit [0], which eats process 'exit' event handlers.
+			// Instead, listen for an implementation detail: When Grunt shuts down, it
+			// removes some 'uncaughtException' event handlers that contain the string
+			// 'TASK_FAILURE'. Super hacky, but it works.
+			// [0]: https://github.com/cowboy/node-exit
+			if (event === 'uncaughtException' && fn.toString().match(/TASK_FAILURE/)) {
+				stop(noop);
+			}
+		});
+
 		start();
 	}
 
 	grunt.registerMultiTask('protractor_webdriver', 'grunt plugin for starting Protractor\'s bundled Selenium Webdriver', function () {
 		new Webdriver(this, this.options({
-			path: '',
-			command: DEFAULT_CMD
+			path: DEFAULT_PATH,
+			command: DEFAULT_CMD,
+			keepAlive: false
 		}));
 	});
 };
